@@ -1,16 +1,21 @@
 'use strict';
 
 import React, {
-	Animated,
 	Component,
-	PanResponder,
 	PropTypes,
+} from 'react';
+import {
+	Animated,
+	PanResponder,
+	Platform,
 	StyleSheet,
 	TouchableOpacity,
 	View
 } from 'react-native';
 
 const DIRECTIONAL_DISTANCE_CHANGE_THRESHOLD = 2;
+const PREVIEW_OPEN_DELAY = 700;
+const PREVIEW_CLOSE_DELAY = 300;
 
 /**
  * Row that is generally used in a SwipeListView.
@@ -29,6 +34,7 @@ class SwipeRow extends Component {
 		this.horizontalSwipeGestureBegan = false;
 		this.swipeInitialX = null;
 		this.parentScrollEnabled = true;
+		this.ranPreview = false;
 		this.state = {
 			dimensionsSet: false,
 			hiddenHeight: 0,
@@ -39,7 +45,7 @@ class SwipeRow extends Component {
 
 	componentWillMount() {
 		this._panResponder = PanResponder.create({
-			onMoveShouldSetPanResponder: _ => true,
+			onMoveShouldSetPanResponder: (e, gs) => this.handleOnMoveShouldSetPanResponder(e, gs),
 			onPanResponderMove: (e, gs) => this.handlePanResponderMove(e, gs),
 			onPanResponderRelease: (e, gs) => this.handlePanResponderEnd(e, gs),
 			onPanResponderTerminate: (e, gs) => this.handlePanResponderEnd(e, gs),
@@ -47,12 +53,28 @@ class SwipeRow extends Component {
 		});
 	}
 
+	getPreviewAnimation(toValue, delay) {
+		return Animated.timing(
+			this.state.translateX,
+			{ duration: this.props.previewDuration, toValue, delay }
+		);
+	}
+
 	onContentLayout(e) {
 		this.setState({
-			dimensionsSet: true,
+			dimensionsSet: !this.props.recalculateHiddenLayout,
 			hiddenHeight: e.nativeEvent.layout.height,
 			hiddenWidth: e.nativeEvent.layout.width,
 		});
+
+		if (this.props.preview && !this.ranPreview) {
+			this.ranPreview = true;
+			let previewOpenValue = this.props.previewOpenValue || this.props.rightOpenValue * 0.5;
+			this.getPreviewAnimation(previewOpenValue, PREVIEW_OPEN_DELAY)
+			.start( _ => {
+				this.getPreviewAnimation(0, PREVIEW_CLOSE_DELAY).start();
+			});
+		}
 	}
 
 	onRowPress() {
@@ -65,11 +87,18 @@ class SwipeRow extends Component {
 		}
 	}
 
+	handleOnMoveShouldSetPanResponder(e, gs) {
+		const { dx } = gs;
+		return Math.abs(dx) > DIRECTIONAL_DISTANCE_CHANGE_THRESHOLD;
+	}
+
 	handlePanResponderMove(e, gestureState) {
 		const { dx, dy } = gestureState;
 		const absDx = Math.abs(dx);
 		const absDy = Math.abs(dy);
 
+		// this check may not be necessary because we don't capture the move until we pass the threshold
+		// just being extra safe here
 		if (absDx > DIRECTIONAL_DISTANCE_CHANGE_THRESHOLD || absDy > DIRECTIONAL_DISTANCE_CHANGE_THRESHOLD) {
 			// we have enough to determine direction
 			if (absDy > absDx && !this.horizontalSwipeGestureBegan) {
@@ -90,9 +119,18 @@ class SwipeRow extends Component {
 			}
 			this.horizontalSwipeGestureBegan = true;
 
+			let newDX = this.swipeInitialX + dx;
+			if (this.props.disableLeftSwipe  && newDX < 0) { newDX = 0; }
+			if (this.props.disableRightSwipe && newDX > 0) { newDX = 0; }
+
+
+			if (this.props.stopLeftSwipe && newDX > this.props.stopLeftSwipe) { newDX = this.props.stopLeftSwipe; }
+			if (this.props.stopRightSwipe && newDX < this.props.stopRightSwipe) { newDX = this.props.stopRightSwipe; }
+
 			this.setState({
-				translateX: new Animated.Value(this.swipeInitialX + dx)
+				translateX: new Animated.Value(newDX)
 			});
+
 		}
 	}
 
@@ -119,6 +157,17 @@ class SwipeRow extends Component {
 			}
 		}
 
+		this.manuallySwipeRow(toValue);
+	}
+
+	/*
+	 * This method is called by SwipeListView
+	 */
+	closeRow() {
+		this.manuallySwipeRow(0);
+	}
+
+	manuallySwipeRow(toValue) {
 		Animated.spring(this.state.translateX,
 			{
 				toValue,
@@ -127,7 +176,9 @@ class SwipeRow extends Component {
 			}
 		).start();
 
-		if (toValue !== 0) {
+		if (toValue === 0) {
+			this.props.onRowClose && this.props.onRowClose();
+		} else {
 			this.props.onRowOpen && this.props.onRowOpen();
 		}
 
@@ -136,26 +187,12 @@ class SwipeRow extends Component {
 		this.horizontalSwipeGestureBegan = false;
 	}
 
-	/*
-	 * This method is called by SwipeListView
-	 */
-	closeRow() {
-		Animated.spring(this.state.translateX,
-			{
-				toValue: 0,
-				friction: this.props.friction,
-				tension: this.props.tension
-			}
-		).start();
-	}
-
 	renderVisibleContent() {
 		// handle touchables
-		let newOnPress;
 		const onPress = this.props.children[1].props.onPress;
 
 		if (onPress) {
-			newOnPress = _ => {
+			const newOnPress = _ => {
 				this.onRowPress();
 				onPress();
 			}
@@ -169,7 +206,10 @@ class SwipeRow extends Component {
 		}
 
 		return (
-			<TouchableOpacity activeOpacity={1} onPress={ _ => this.onRowPress() }>
+			<TouchableOpacity
+				activeOpacity={1}
+				onPress={ _ => this.onRowPress() }
+			>
 				{this.props.children[1]}
 			</TouchableOpacity>
 		)
@@ -211,7 +251,7 @@ class SwipeRow extends Component {
 
 	render() {
 		return (
-			<View style={styles.container}>
+			<View style={this.props.style ? this.props.style : styles.container}>
 				<View style={[
 					styles.hidden,
 					{
@@ -230,7 +270,8 @@ class SwipeRow extends Component {
 
 const styles = StyleSheet.create({
 	container: {
-		flex: 1
+		// As of RN 0.29 flex: 1 is causing all rows to be the same height
+		// flex: 1
 	},
 	hidden: {
 		bottom: 0,
@@ -262,6 +303,14 @@ SwipeRow.propTypes = {
 	 */
 	rightOpenValue: PropTypes.number,
 	/**
+	 * TranslateX value for stop the row to the left (positive number)
+	 */
+	stopLeftSwipe: PropTypes.number,
+	/**
+	 * TranslateX value for stop the row to the right (negative number)
+	 */
+	stopRightSwipe: PropTypes.number,
+	/**
 	 * Friction for the open / close animation
 	 */
 	friction: PropTypes.number,
@@ -272,14 +321,51 @@ SwipeRow.propTypes = {
 	/**
 	 * Should the row be closed when it is tapped
 	 */
-	closeOnRowPress: PropTypes.bool
-
+	closeOnRowPress: PropTypes.bool,
+	/**
+	 * Disable ability to swipe the row left
+	 */
+	disableLeftSwipe: PropTypes.bool,
+	/**
+	 * Disable ability to swipe the row right
+	 */
+	disableRightSwipe: PropTypes.bool,
+	/**
+	 * Enable hidden row onLayout calculations to run always
+	 */
+	recalculateHiddenLayout: PropTypes.bool,
+	/**
+	 * Called when a swipe row is animating closed
+	 */
+	onRowClose: PropTypes.func,
+	/**
+	 * Styles for the parent wrapper View of the SwipeRow
+	 */
+	style: PropTypes.object,
+	/**
+	 * Should the row do a slide out preview to show that it is swipeable
+	 */
+	preview: PropTypes.bool,
+	/**
+	 * Duration of the slide out preview animation
+	 */
+	previewDuration: PropTypes.number,
+	/**
+	 * TranslateX value for the slide out preview animation
+	 * Default: 0.5 * props.rightOpenValue
+	 */
+	previewOpenValue: PropTypes.number
 };
 
 SwipeRow.defaultProps = {
 	leftOpenValue: 0,
 	rightOpenValue: 0,
-	closeOnRowPress: true
+	closeOnRowPress: true,
+	disableLeftSwipe: false,
+	disableRightSwipe: false,
+	recalculateHiddenLayout: false,
+	preview: false,
+	previewDuration: 300
 };
 
 export default SwipeRow;
